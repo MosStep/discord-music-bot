@@ -8,6 +8,7 @@ import re
 import discord
 from discord import app_commands
 from discord.ext import commands
+from discord.http import Route
 
 from audio import describe_chain
 from player import GuildPlayer, LoopMode
@@ -18,6 +19,13 @@ log = logging.getLogger(__name__)
 GREEN = discord.Colour.from_str("#1db954")
 RED = discord.Colour.from_str("#ed4245")
 QUEUE_PAGE_SIZE = 10
+URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+# id ของ activity "Watch Together" ที่ Discord ทำไว้ให้ดู YouTube ร่วมกัน
+YOUTUBE_TOGETHER_ID = "880218394199220334"
+
+# ไม่เลือกภายในกี่วินาทีแล้วให้เล่นอันดับแรกเอง
+PICK_TIMEOUT = 3.0
 
 
 class NotInVoice(commands.CheckFailure):
@@ -101,66 +109,105 @@ class Music(commands.Cog):
 
     # ---------------------------------------------------------------- เล่นเพลง
 
-    @commands.hybrid_command(name="play", aliases=["p"], description="เล่นเพลงจาก YouTube")
+    @commands.hybrid_command(name="pa", aliases=["p"], description="เล่นเพลงจาก YouTube")
+    @app_commands.describe(query="ชื่อเพลง หรือลิงก์ YouTube (ใส่ลิงก์ playlist ได้ทั้งชุด)")
+    @commands.guild_only()
+    async def pa(self, ctx: commands.Context, *, query: str) -> None:
+        await self._enqueue(ctx, query, front=False)
+
+    # ลงทะเบียน /play เป็นคำสั่งจริงอีกตัว ไม่ใช่แค่ alias
+    # เพราะ alias ใช้ได้เฉพาะคำสั่งแบบพิมพ์ ส่วนเมนู slash จะเห็นแค่ชื่อหลัก
+    @commands.hybrid_command(name="play", description="เล่นเพลงจาก YouTube (เหมือน /pa)")
     @app_commands.describe(query="ชื่อเพลง หรือลิงก์ YouTube (ใส่ลิงก์ playlist ได้ทั้งชุด)")
     @commands.guild_only()
     async def play(self, ctx: commands.Context, *, query: str) -> None:
         await self._enqueue(ctx, query, front=False)
 
-    @commands.hybrid_command(name="playnext", aliases=["pn"], description="แทรกเพลงเป็นคิวถัดไป")
+    @commands.hybrid_command(name="pn", aliases=["playnext"], description="แทรกเพลงเป็นคิวถัดไป")
     @app_commands.describe(query="ชื่อเพลง หรือลิงก์ YouTube")
     @commands.guild_only()
     async def playnext(self, ctx: commands.Context, *, query: str) -> None:
         await self._enqueue(ctx, query, front=True)
 
     async def _enqueue(self, ctx: commands.Context, query: str, *, front: bool) -> None:
+        # พิมพ์ชื่อเพลงแล้วให้เลือกเอง เพราะเพลงชื่อซ้ำกันเยอะ ระบบเดาเองมักได้ไม่ตรง
+        # ใส่ลิงก์มาถือว่ารู้อยู่แล้วว่าจะเอาอันไหน เล่นทันทีไม่ต้องถาม
+        if self.cfg.play_picker and not URL_RE.match(query.strip()):
+            await self._offer_choices(ctx, query, front=front)
+            return
+
         async with ctx.typing():
             player = await self.ensure_player(ctx)
             tracks = await self.ytdl.resolve(query)
             self.stamp(tracks, ctx.author)
             player.add(tracks, front=front)
 
-        position = 1 if front else len(player.queue)
+        await ctx.reply(embed=self._added_embed(player, tracks, front=front))
+
+    def _added_embed(
+        self, player: GuildPlayer, tracks: list[Track], *, front: bool
+    ) -> discord.Embed:
         if len(tracks) > 1:
             total = fmt_duration(sum(t.duration or 0 for t in tracks))
-            embed = discord.Embed(
+            return discord.Embed(
                 description=f"เพิ่ม **{len(tracks)}** เพลงเข้าคิวแล้ว • รวม `{total}`",
                 colour=GREEN,
             )
-        else:
-            track = tracks[0]
-            embed = discord.Embed(
-                title=track.title,
-                url=track.webpage_url or None,
-                description=f"ความยาว `{track.duration_text}`",
-                colour=GREEN,
-            )
-            embed.set_author(name="เพิ่มเข้าคิวแล้ว")
-            if track.thumbnail:
-                embed.set_thumbnail(url=track.thumbnail)
-            if player.current:
-                embed.set_footer(text=f"คิวที่ {position}")
-        await ctx.reply(embed=embed)
+
+        track = tracks[0]
+        embed = discord.Embed(
+            title=track.title,
+            url=track.webpage_url or None,
+            description=f"ความยาว `{track.duration_text}`",
+            colour=GREEN,
+        )
+        embed.set_author(name="เพิ่มเข้าคิวแล้ว")
+        if track.thumbnail:
+            embed.set_thumbnail(url=track.thumbnail)
+        if player.current:
+            embed.set_footer(text=f"คิวที่ {1 if front else len(player.queue)}")
+        return embed
 
     @commands.hybrid_command(name="search", description="ค้นหา 5 อันดับแรกแล้วเลือกเอง")
     @app_commands.describe(query="คำค้น")
     @commands.guild_only()
     async def search(self, ctx: commands.Context, *, query: str) -> None:
+        await self._offer_choices(ctx, query, front=False)
+
+    async def _offer_choices(self, ctx: commands.Context, query: str, *, front: bool) -> None:
+        """แสดงผลค้นหา 5 อันดับให้คนที่สั่งเลือกเอง"""
         async with ctx.typing():
             results = await self.ytdl.search(query, limit=5)
+
         if not results:
             await ctx.reply("⚠️ ไม่พบผลลัพธ์")
             return
 
-        view = SearchView(self, ctx, results)
+        # เจอผลเดียวก็ไม่ต้องถามให้เสียเวลา
+        if len(results) == 1:
+            await self._add_now(ctx, results[0].webpage_url, front=front)
+            return
+
+        view = SearchView(self, ctx, results, front=front)
         listing = "\n".join(
             f"**{i}.** [{t.title}]({t.webpage_url}) `{t.duration_text}`"
+            + (f" — {t.uploader}" if t.uploader else "")
             for i, t in enumerate(results, start=1)
         )
-        view.message = await ctx.reply(
-            embed=discord.Embed(title=f"ผลการค้นหา: {query}", description=listing, colour=GREEN),
-            view=view,
+        embed = discord.Embed(title=f"ผลการค้นหา: {query}", description=listing, colour=GREEN)
+        embed.set_footer(
+            text=f"เลือกจากเมนูด้านล่าง • ไม่เลือกใน {PICK_TIMEOUT:g} วินาที จะเล่นอันดับ 1 ให้เอง"
         )
+        view.message = await ctx.reply(embed=embed, view=view)
+
+    async def _add_now(self, ctx: commands.Context, query: str, *, front: bool) -> None:
+        """เพิ่มเข้าคิวทันทีโดยไม่ถาม (ใช้ตอนได้ลิงก์ที่แน่ชัดแล้ว)"""
+        async with ctx.typing():
+            player = await self.ensure_player(ctx)
+            tracks = await self.ytdl.resolve(query, allow_playlist=False)
+            self.stamp(tracks, ctx.author)
+            player.add(tracks, front=front)
+        await ctx.reply(embed=self._added_embed(player, tracks, front=front))
 
     # ---------------------------------------------------------------- ควบคุม
 
@@ -377,6 +424,71 @@ class Music(commands.Cog):
             return
         await ctx.reply(f"🔁 โหมดเล่นซ้ำ: **{player.loop_mode.label}**")
 
+    # ---------------------------------------------------------------- วิดีโอ
+
+    @commands.hybrid_command(
+        name="v", aliases=["video", "watch"], description="เปิด Watch Together ดูวิดีโอพร้อมกัน"
+    )
+    @app_commands.describe(query="ชื่อหรือลิงก์วิดีโอที่จะดู (ไม่ใส่ก็ได้)")
+    @commands.guild_only()
+    async def video(self, ctx: commands.Context, *, query: str | None = None) -> None:
+        if not isinstance(ctx.author, discord.Member) or not ctx.author.voice:
+            await ctx.reply("⚠️ เข้าห้องเสียงก่อนนะครับ Watch Together เปิดในห้องเสียงเท่านั้น")
+            return
+
+        channel = ctx.author.voice.channel
+        if not channel.permissions_for(ctx.me).create_instant_invite:
+            await ctx.reply(
+                f"⚠️ ผมไม่มีสิทธิ์ **Create Invite** ในห้อง **{channel.name}** "
+                "ให้เพิ่มสิทธิ์นี้ให้บอทก่อน แล้วลองใหม่"
+            )
+            return
+
+        async with ctx.typing():
+            try:
+                link = await self._create_activity(channel)
+            except discord.HTTPException as exc:
+                await ctx.reply(f"⚠️ เปิด Watch Together ไม่สำเร็จ: {exc.text or exc}")
+                return
+
+            found: Track | None = None
+            if query:
+                try:
+                    found = (await self.ytdl.resolve(query, allow_playlist=False))[0]
+                except ExtractError:
+                    found = None
+
+        embed = discord.Embed(
+            title="เปิด Watch Together แล้ว",
+            description=(
+                f"กดลิงก์เพื่อเข้าดูพร้อมกันในห้อง **{channel.name}**\n{link}\n\n"
+                "ทุกคนที่กดจะเห็นวิดีโอเดียวกัน เล่น/หยุด/เลื่อนเวลาตรงกันหมด"
+            ),
+            colour=GREEN,
+        )
+        if found:
+            # Watch Together เปิดวิดีโอที่ระบุล่วงหน้าไม่ได้ ต้องวางลิงก์ในตัว activity เอง
+            embed.add_field(
+                name="วิดีโอที่คุณหา — วางลิงก์นี้ในช่องค้นหาของ Watch Together",
+                value=f"{found.markdown}\n`{found.webpage_url}`",
+                inline=False,
+            )
+        embed.set_footer(text="ลิงก์หมดอายุใน 24 ชั่วโมง")
+        await ctx.reply(embed=embed)
+
+    async def _create_activity(self, channel: discord.VoiceChannel) -> str:
+        """สร้าง invite แบบ activity — discord.py ยังไม่มี API ตรง ต้องยิง route เอง"""
+        payload = {
+            "max_age": 86400,
+            "max_uses": 0,
+            "target_application_id": YOUTUBE_TOGETHER_ID,
+            "target_type": 2,  # 2 = embedded application
+            "temporary": False,
+        }
+        route = Route("POST", "/channels/{channel_id}/invites", channel_id=channel.id)
+        data = await self.bot.http.request(route, json=payload)
+        return f"https://discord.gg/{data['code']}"
+
     # ---------------------------------------------------------------- คุณภาพเสียง
 
     @commands.hybrid_command(name="volume", aliases=["vol"], description="ปรับระดับเสียง 0-200")
@@ -442,16 +554,20 @@ class Music(commands.Cog):
 class SearchView(discord.ui.View):
     """ปุ่มเลือกเพลงจากผลการค้นหา"""
 
-    def __init__(self, cog: Music, ctx: commands.Context, results: list[Track]) -> None:
-        super().__init__(timeout=60)
+    def __init__(
+        self, cog: Music, ctx: commands.Context, results: list[Track], *, front: bool = False
+    ) -> None:
+        super().__init__(timeout=PICK_TIMEOUT)
         self.cog = cog
         self.ctx = ctx
         self.results = results
+        self.front = front
         self.message: discord.Message | None = None
+        self._handled = False  # กันไม่ให้เลือกเองกับเลือกอัตโนมัติชนกัน
 
         options = [
             discord.SelectOption(
-                label=t.title[:100],
+                label=f"{i + 1}. {t.title}"[:100],
                 description=f"{t.duration_text} • {t.uploader or ''}"[:100],
                 value=str(i),
             )
@@ -470,31 +586,53 @@ class SearchView(discord.ui.View):
         return True
 
     async def _on_select(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer()
-        track = self.results[int(interaction.data["values"][0])]
+        if self._handled:
+            await interaction.response.defer()
+            return
+        self._handled = True
 
+        await interaction.response.defer()
+        index = int(interaction.data["values"][0])
+        embed = await self._enqueue_choice(index, auto=False)
+
+        self.clear_items()
+        await interaction.edit_original_response(embed=embed, view=self)
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        """ครบเวลาแล้วยังไม่เลือก — เล่นอันดับแรกให้เลย"""
+        if self._handled:
+            return
+        self._handled = True
+
+        try:
+            embed = await self._enqueue_choice(0, auto=True)
+        except Exception as exc:  # noqa: BLE001 - ไม่มี context ให้ตอบ error ต้องกลืนไว้
+            log.warning("เลือกเพลงอัตโนมัติไม่สำเร็จ: %s", exc)
+            embed = discord.Embed(description=f"⚠️ เพิ่มเพลงอัตโนมัติไม่สำเร็จ: {exc}", colour=RED)
+
+        if self.message:
+            self.clear_items()
+            try:
+                await self.message.edit(embed=embed, view=self)
+            except discord.HTTPException:
+                pass
+        self.stop()
+
+    async def _enqueue_choice(self, index: int, *, auto: bool) -> discord.Embed:
+        track = self.results[index]
         player = await self.cog.ensure_player(self.ctx)
         # ผลจากการค้นหาเป็นข้อมูลแบบย่อ ต้องดึงรายละเอียดเต็มก่อนเข้าคิว
         tracks = await self.cog.ytdl.resolve(track.webpage_url, allow_playlist=False)
         self.cog.stamp(tracks, self.ctx.author)
-        player.add(tracks)
+        player.add(tracks, front=self.front)
 
-        self.clear_items()
-        await interaction.edit_original_response(
-            embed=discord.Embed(
-                description=f"✅ เพิ่ม {tracks[0].markdown} เข้าคิวแล้ว", colour=GREEN
-            ),
-            view=self,
-        )
-        self.stop()
-
-    async def on_timeout(self) -> None:
-        if self.message:
-            self.clear_items()
-            try:
-                await self.message.edit(view=self)
-            except discord.HTTPException:
-                pass
+        embed = self.cog._added_embed(player, tracks, front=self.front)
+        if auto:
+            existing = embed.footer.text
+            note = f"เลือกอัตโนมัติ (อันดับ 1) เพราะไม่ได้เลือกใน {PICK_TIMEOUT:g} วินาที"
+            embed.set_footer(text=f"{existing} • {note}" if existing else note)
+        return embed
 
 
 async def setup(bot: commands.Bot) -> None:

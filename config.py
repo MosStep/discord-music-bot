@@ -30,6 +30,7 @@ class Config:
     cookie_file: str | None
     opus_bitrate: int | None
     normalize: bool
+    play_picker: bool
 
     @classmethod
     def load(cls) -> "Config":
@@ -59,4 +60,5 @@ class Config:
             cookie_file=cookie_file,
             opus_bitrate=min(max(bitrate, 16), 512) if bitrate else None,
             normalize=_int("AUDIO_NORMALIZE", 0) == 1,
+            play_picker=_int("PLAY_PICKER", 1) == 1,
         )

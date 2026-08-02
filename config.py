@@ -31,6 +31,8 @@ class Config:
     opus_bitrate: int | None
     normalize: bool
     play_picker: bool
+    max_playlist: int
+    ytdl_sleep: float
 
     @classmethod
     def load(cls) -> "Config":
@@ -61,4 +63,6 @@ class Config:
             opus_bitrate=min(max(bitrate, 16), 512) if bitrate else None,
             normalize=_int("AUDIO_NORMALIZE", 0) == 1,
             play_picker=_int("PLAY_PICKER", 1) == 1,
+            max_playlist=max(1, _int("MAX_PLAYLIST", 100)),
+            ytdl_sleep=max(0, _int("YTDL_SLEEP_MS", 800)) / 1000,
         )

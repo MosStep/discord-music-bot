@@ -16,14 +16,19 @@ import discord
 log = logging.getLogger(__name__)
 
 # ต่อสายใหม่อัตโนมัติเวลาเน็ตสะดุด ไม่งั้นเพลงจะหยุดกลางคัน
+# rw_timeout กันกรณีเซิร์ฟเวอร์ค้างไม่ส่งข้อมูลแต่ไม่ตัดการเชื่อมต่อ (หน่วยไมโครวินาที)
 FFMPEG_BEFORE = (
     "-nostdin "
-    "-reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 -reconnect_delay_max 5"
+    "-reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 "
+    "-reconnect_on_http_error 4xx,5xx -reconnect_delay_max 5 "
+    "-rw_timeout 15000000"
 )
 
-# soxr precision 28 = resampler คุณภาพสูงสุดของ ffmpeg (ค่าเริ่มต้นคือ swr ธรรมดา)
+# soxr เป็น resampler คุณภาพสูงของ ffmpeg (ค่าเริ่มต้นคือ swr ธรรมดาที่ด้อยกว่า)
+# precision 24 โปร่งใสเกินพอสำหรับปลายทาง 16-bit และเบากว่า 28 มาก
+# — precision 28 กินซีพียูหนักจนแย่งเวลาเธรดส่งเสียง ทำให้เสียงกระตุกเป็นช่วง ๆ
 # triangular dither ช่วยกลบ quantisation noise ตอนลดมาเป็น 16-bit
-HQ_RESAMPLE = "aresample=resampler=soxr:precision=28:dither_method=triangular:osr=48000"
+HQ_RESAMPLE = "aresample=resampler=soxr:precision=24:dither_method=triangular:osr=48000"
 
 # EBU R128 ปรับความดังให้เท่ากันทุกเพลง (เปิดผ่าน AUDIO_NORMALIZE=1)
 LOUDNORM = "loudnorm=I=-14:LRA=11:TP=-1.5"

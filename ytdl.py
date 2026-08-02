@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import re
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,12 +50,35 @@ class Track:
         return f"[{self.title}]({self.webpage_url})"
 
 
-def _base_opts(cookie_file: str | None) -> dict[str, Any]:
+def wants_playlist(url: str) -> bool:
+    """ลิงก์นี้ตั้งใจจะเอาทั้งเพลย์ลิสต์จริงหรือเปล่า
+
+    กันสองเคสที่ทำให้บอทค้าง:
+    - Mix/Radio (list=RD...) เป็นเพลย์ลิสต์ที่ YouTube สร้างสด ๆ ไม่มีจุดจบ ดูดทั้งชุดไม่ได้
+    - watch?v=...&list=... คนตั้งใจเปิดคลิปเดียว แค่บังเอิญก๊อปลิงก์ตอนอยู่ในเพลย์ลิสต์
+    """
+    if not _URL_RE.match(url):
+        return False
+
+    params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    playlist_id = (params.get("list") or [""])[0]
+    if not playlist_id:
+        return False
+    if playlist_id.startswith(("RD", "UL", "LL")):
+        return False
+    return "v" not in params
+
+
+def _base_opts(
+    cookie_file: str | None, max_playlist: int = 100, sleep_requests: float = 0.8
+) -> dict[str, Any]:
     opts: dict[str, Any] = {
         # ไม่จำกัด bitrate — เอาไฟล์เสียงที่ดีที่สุดที่ YouTube มีให้
         "format": "bestaudio/best",
-        # เรียงลำดับความสำคัญเอง: bitrate สูงสุดก่อน แล้วค่อยเลือก opus (คุณภาพต่อ bit ดีกว่า aac)
-        "format_sort": ["abr", "acodec:opus", "asr"],
+        # เอา opus ก่อนเพราะเป็น 48kHz อยู่แล้ว ตรงกับที่ Discord ใช้พอดี ไม่ต้อง resample
+        # (m4a ของ YouTube เป็น 44.1kHz ต้องแปลงเรต ซึ่งกินซีพียูจนเสียงกระตุกได้)
+        # แล้วค่อยเรียงตาม bitrate สูงสุด
+        "format_sort": ["acodec:opus", "abr", "asr"],
         "quiet": True,
         "no_warnings": True,
         "noprogress": True,
@@ -63,10 +87,15 @@ def _base_opts(cookie_file: str | None) -> dict[str, Any]:
         "nocheckcertificate": True,
         "cachedir": False,
         "retries": 3,
+        "extractor_retries": 3,
         "socket_timeout": 15,
         "default_search": "ytsearch",
         "source_address": "0.0.0.0",
         "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
+        # YouTube ไม่ประกาศลิมิตไว้ แต่ยิงรัว ๆ จะโดนกันเป็นชั่วโมง
+        # หน่วงระหว่างคำขอกับจำกัดจำนวนเพลงต่อครั้ง คือวิธีที่กันได้จริง
+        "sleep_interval_requests": sleep_requests,
+        "playlistend": max_playlist,
     }
     if cookie_file:
         opts["cookiefile"] = cookie_file
@@ -85,8 +114,16 @@ def _to_track(info: dict[str, Any]) -> Track:
 
 
 class YTDLClient:
-    def __init__(self, cookie_file: str | None = None) -> None:
+    def __init__(
+        self,
+        cookie_file: str | None = None,
+        *,
+        max_playlist: int = 100,
+        sleep_requests: float = 0.8,
+    ) -> None:
         self._cookie_file = cookie_file
+        self._max_playlist = max_playlist
+        self._sleep_requests = sleep_requests
 
     async def _extract(self, query: str, opts: dict[str, Any]) -> dict[str, Any]:
         loop = asyncio.get_running_loop()
@@ -104,8 +141,8 @@ class YTDLClient:
 
     async def resolve(self, query: str, *, allow_playlist: bool = True) -> list[Track]:
         """แปลงคำค้นหรือลิงก์เป็นรายการเพลง (playlist ได้ทั้งอัลบั้ม)"""
-        opts = _base_opts(self._cookie_file)
-        opts["noplaylist"] = not (allow_playlist and _URL_RE.match(query))
+        opts = _base_opts(self._cookie_file, self._max_playlist, self._sleep_requests)
+        opts["noplaylist"] = not (allow_playlist and wants_playlist(query))
 
         info = await self._extract(query, opts)
         if not info:
@@ -119,7 +156,7 @@ class YTDLClient:
 
     async def search(self, query: str, limit: int = 5) -> list[Track]:
         """ค้นหาแบบเร็ว (flat) สำหรับเมนูให้ผู้ใช้เลือก"""
-        opts = _base_opts(self._cookie_file)
+        opts = _base_opts(self._cookie_file, self._max_playlist, self._sleep_requests)
         opts.update({"extract_flat": "in_playlist", "noplaylist": True})
 
         info = await self._extract(f"ytsearch{limit}:{query}", opts)
@@ -137,7 +174,7 @@ class YTDLClient:
 
     async def refresh_stream(self, track: Track) -> str:
         """ดึง URL สตรีมสด ๆ ตอนกำลังจะเล่น"""
-        opts = _base_opts(self._cookie_file)
+        opts = _base_opts(self._cookie_file, self._max_playlist, self._sleep_requests)
         opts["noplaylist"] = True
 
         info = await self._extract(track.webpage_url, opts)

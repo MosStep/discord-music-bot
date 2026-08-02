@@ -55,7 +55,11 @@ class Music(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.cfg = bot.cfg
-        self.ytdl = YTDLClient(bot.cfg.cookie_file)
+        self.ytdl = YTDLClient(
+            bot.cfg.cookie_file,
+            max_playlist=bot.cfg.max_playlist,
+            sleep_requests=bot.cfg.ytdl_sleep,
+        )
         self.players: dict[int, GuildPlayer] = {}
 
     async def cog_unload(self) -> None:

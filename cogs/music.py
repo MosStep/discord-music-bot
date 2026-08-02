@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import re
 
@@ -196,7 +197,7 @@ class Music(commands.Cog):
         )
         embed = discord.Embed(title=f"ผลการค้นหา: {query}", description=listing, colour=GREEN)
         embed.set_footer(
-            text=f"เลือกจากเมนูด้านล่าง • ไม่เลือกใน {PICK_TIMEOUT:g} วินาที จะเล่นอันดับ 1 ให้เอง"
+            text=f"กดปุ่มเลข • ไม่กดใน {PICK_TIMEOUT:g} วินาที จะเล่นอันดับ 1 (ปุ่มเขียว) ให้เอง"
         )
         view.message = await ctx.reply(embed=embed, view=view)
 
@@ -565,38 +566,54 @@ class SearchView(discord.ui.View):
         self.message: discord.Message | None = None
         self._handled = False  # กันไม่ให้เลือกเองกับเลือกอัตโนมัติชนกัน
 
-        options = [
-            discord.SelectOption(
-                label=f"{i + 1}. {t.title}"[:100],
-                description=f"{t.duration_text} • {t.uploader or ''}"[:100],
-                value=str(i),
+        # ใช้ปุ่มแทน dropdown เพราะ dropdown ต้องกดสองที (เปิดเมนูแล้วค่อยเลือก)
+        # ปุ่มกดทีเดียวจบ และทันกับเวลาเลือกอัตโนมัติ 3 วินาที
+        for i in range(len(results)):
+            button = discord.ui.Button(
+                label=str(i + 1),
+                # อันดับ 1 เป็นสีเขียวเพราะเป็นตัวที่จะถูกเลือกเองถ้าไม่กดอะไร
+                style=discord.ButtonStyle.success if i == 0 else discord.ButtonStyle.primary,
+                row=0,
             )
-            for i, t in enumerate(results)
-        ]
-        select = discord.ui.Select(placeholder="เลือกเพลงที่ต้องการ", options=options)
-        select.callback = self._on_select
-        self.add_item(select)
+            button.callback = functools.partial(self._on_button, i)
+            self.add_item(button)
+
+        cancel = discord.ui.Button(label="ยกเลิก", style=discord.ButtonStyle.secondary, row=1)
+        cancel.callback = self._on_cancel
+        self.add_item(cancel)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.ctx.author.id:
             await interaction.response.send_message(
-                "⚠️ ปุ่มนี้ของคนที่สั่งค้นหาเท่านั้นครับ", ephemeral=True
+                "⚠️ ปุ่มนี้ของคนที่สั่งค้นหาเท่านั้นครับ พิมพ์คำสั่งเองได้เลย", ephemeral=True
             )
             return False
         return True
 
-    async def _on_select(self, interaction: discord.Interaction) -> None:
+    async def _on_button(self, index: int, interaction: discord.Interaction) -> None:
         if self._handled:
             await interaction.response.defer()
             return
         self._handled = True
 
         await interaction.response.defer()
-        index = int(interaction.data["values"][0])
         embed = await self._enqueue_choice(index, auto=False)
 
         self.clear_items()
         await interaction.edit_original_response(embed=embed, view=self)
+        self.stop()
+
+    async def _on_cancel(self, interaction: discord.Interaction) -> None:
+        if self._handled:
+            await interaction.response.defer()
+            return
+        self._handled = True
+
+        await interaction.response.defer()
+        self.clear_items()
+        await interaction.edit_original_response(
+            embed=discord.Embed(description="ยกเลิกแล้ว", colour=RED), view=self
+        )
         self.stop()
 
     async def on_timeout(self) -> None:

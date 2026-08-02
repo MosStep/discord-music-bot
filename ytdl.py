@@ -51,22 +51,16 @@ class Track:
 
 
 def wants_playlist(url: str) -> bool:
-    """ลิงก์นี้ตั้งใจจะเอาทั้งเพลย์ลิสต์จริงหรือเปล่า
+    """ลิงก์นี้มีเพลย์ลิสต์ให้ดึงไหม
 
-    กันสองเคสที่ทำให้บอทค้าง:
-    - Mix/Radio (list=RD...) เป็นเพลย์ลิสต์ที่ YouTube สร้างสด ๆ ไม่มีจุดจบ ดูดทั้งชุดไม่ได้
-    - watch?v=...&list=... คนตั้งใจเปิดคลิปเดียว แค่บังเอิญก๊อปลิงก์ตอนอยู่ในเพลย์ลิสต์
+    มี list= ก็ดึงมาทั้งชุด รวมถึง Mix/Radio (list=RD...) ที่ YouTube สร้างสด ๆ
+    Mix ไม่มีจุดจบในตัวมันเอง แต่ playlistend จำกัดจำนวนไว้แล้ว จึงหยุดได้แน่นอน
     """
     if not _URL_RE.match(url):
         return False
 
     params = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-    playlist_id = (params.get("list") or [""])[0]
-    if not playlist_id:
-        return False
-    if playlist_id.startswith(("RD", "UL", "LL")):
-        return False
-    return "v" not in params
+    return bool((params.get("list") or [""])[0])
 
 
 def _base_opts(
@@ -113,6 +107,20 @@ def _to_track(info: dict[str, Any]) -> Track:
     )
 
 
+def _flat_track(entry: dict[str, Any]) -> Track:
+    """แปลงรายการแบบย่อ (extract_flat) เป็น Track
+
+    ไม่มีลิงก์สตรีมกับรูปปก แต่ไม่เป็นไร เพราะตัวเล่นจะไปดึงข้อมูลเต็มตอนใกล้ถึงคิวอยู่แล้ว
+    """
+    return Track(
+        title=entry.get("title") or "ไม่ทราบชื่อ",
+        webpage_url=entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id')}",
+        duration=int(entry["duration"]) if entry.get("duration") else None,
+        thumbnail=entry.get("thumbnail"),
+        uploader=entry.get("uploader") or entry.get("channel"),
+    )
+
+
 class YTDLClient:
     def __init__(
         self,
@@ -140,19 +148,29 @@ class YTDLClient:
             raise ExtractError(str(exc)) from exc
 
     async def resolve(self, query: str, *, allow_playlist: bool = True) -> list[Track]:
-        """แปลงคำค้นหรือลิงก์เป็นรายการเพลง (playlist ได้ทั้งอัลบั้ม)"""
+        """แปลงคำค้นหรือลิงก์เป็นรายการเพลง (เพลย์ลิสต์ได้ทั้งชุด สูงสุดตาม max_playlist)"""
+        expand = allow_playlist and wants_playlist(query)
+
         opts = _base_opts(self._cookie_file, self._max_playlist, self._sleep_requests)
-        opts["noplaylist"] = not (allow_playlist and wants_playlist(query))
+        opts["noplaylist"] = not expand
+        if expand:
+            # ดึงแบบย่อ: ขอครั้งเดียวได้ทั้งรายการ
+            # ถ้าดึงเต็มทีละเพลง 100 เพลงจะกลายเป็น 100 คำขอ รอนานและเสี่ยงโดนจำกัดอัตรา
+            opts["extract_flat"] = "in_playlist"
 
         info = await self._extract(query, opts)
         if not info:
             raise ExtractError("ไม่พบผลลัพธ์")
 
-        entries = info["entries"] if info.get("_type") == "playlist" else [info]
-        tracks = [_to_track(e) for e in entries if e]
+        if info.get("_type") == "playlist":
+            entries = [e for e in (info.get("entries") or []) if e]
+            tracks = [_flat_track(e) if expand else _to_track(e) for e in entries]
+        else:
+            tracks = [_to_track(info)]
+
         if not tracks:
             raise ExtractError("ไม่พบผลลัพธ์")
-        return tracks
+        return tracks[: self._max_playlist]
 
     async def search(self, query: str, limit: int = 5) -> list[Track]:
         """ค้นหาแบบเร็ว (flat) สำหรับเมนูให้ผู้ใช้เลือก"""
@@ -162,12 +180,7 @@ class YTDLClient:
         info = await self._extract(f"ytsearch{limit}:{query}", opts)
         entries = (info or {}).get("entries") or []
         return [
-            Track(
-                title=e.get("title") or "ไม่ทราบชื่อ",
-                webpage_url=e.get("url") or f"https://www.youtube.com/watch?v={e.get('id')}",
-                duration=int(e["duration"]) if e.get("duration") else None,
-                uploader=e.get("uploader") or e.get("channel"),
-            )
+            _flat_track(e)
             for e in entries
             if e
         ]

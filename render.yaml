@@ -1,0 +1,38 @@
+# Blueprint สำหรับ Render — สร้าง service อัตโนมัติจากไฟล์นี้
+#
+# หมายเหตุสำคัญ: Render ไม่มี Background Worker แบบฟรี
+# ไฟล์นี้จึงตั้งเป็น Web Service ซึ่งฟรีได้ แต่มีเงื่อนไขว่า
+#   - หลับเองเมื่อไม่มีคนเรียกเกิน 15 นาที (บอทจะออฟไลน์)
+#   - ต้องมีตัวปลุกจากข้างนอกยิงมาที่ /health ทุก ๆ 10 นาที เช่น UptimeRobot
+#   - โควตา 750 ชั่วโมง/เดือน ซึ่งพอดีกับ 1 service รันทั้งเดือน
+#
+# ถ้าจะเอาแบบไม่ต้องมีลูกเล่น ให้เปลี่ยน type เป็น worker แล้วเลือกแพลนที่เสียเงิน
+
+services:
+  - type: web
+    name: discord-music-bot
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      # sync: false = ไม่เก็บค่าไว้ในไฟล์ ต้องไปกรอกในหน้าเว็บ Render เอง
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: DEV_GUILD_ID
+        sync: false
+      - key: YTDL_COOKIE_FILE
+        sync: false
+      - key: COMMAND_PREFIX
+        value: "!"
+      - key: DEFAULT_VOLUME
+        value: "100"
+      - key: PLAY_PICKER
+        value: "1"
+      - key: MAX_PLAYLIST
+        value: "100"
+      - key: YTDL_SLEEP_MS
+        value: "800"
+      - key: IDLE_TIMEOUT
+        value: "300"

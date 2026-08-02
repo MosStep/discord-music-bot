@@ -89,6 +89,76 @@ YouTube (opus สูงสุดที่มี) → ffmpeg → PCM 48kHz stereo
 | `FFMPEG_PATH` | ว่าง | path ของ ffmpeg ถ้าไม่ได้อยู่ใน PATH |
 | `YTDL_COOKIE_FILE` | ว่าง | ไฟล์ cookies เมื่อ YouTube ขอยืนยันตัวตน |
 
+## ย้ายไปรันบนเครื่องอื่น
+
+บนเครื่องใหม่ ติดตั้ง [Git](https://git-scm.com/download/win) ก่อน แล้วเปิด PowerShell:
+
+```powershell
+git clone https://github.com/MosStep/discord-music-bot.git
+cd discord-music-bot
+.\setup.ps1
+```
+
+`setup.ps1` จะตรวจและติดตั้ง Python กับ ffmpeg ให้ถ้ายังไม่มี สร้าง virtual environment
+ลง dependency และเตรียมไฟล์ `.env` ให้พร้อม เหลือแค่ใส่ token
+
+**อย่าคัดลอกไฟล์ `.env` ข้ามเครื่องผ่านคลาวด์หรือแชท** เพราะมี token อยู่ข้างใน
+ให้ไปกด Reset Token ใหม่ที่ Developer Portal แล้วพิมพ์ลงเครื่องใหม่โดยตรง
+ปลอดภัยกว่าและใช้เวลาไม่ถึงนาที
+
+เสร็จแล้วรัน `.\run_forever.ps1` และตั้ง Task Scheduler ตามหัวข้อถัดไป
+
+**รันบอทได้ทีละเครื่องเท่านั้น** ถ้าเปิดสองเครื่องพร้อมกันด้วย token เดียวกัน
+บอทจะตอบทุกคำสั่งซ้ำสองรอบและแย่งกันเข้าห้องเสียง
+
+## ให้บอทออนไลน์ 24 ชั่วโมง
+
+### วิธีที่แนะนำ — รันบนเครื่องตัวเอง (ฟรีจริง)
+
+YouTube บล็อก IP ของ datacenter หนักมาก บอทที่รันบนคลาวด์มักเจอ
+"Sign in to confirm you're not a bot" ภายในไม่กี่ชั่วโมง ขณะที่เครื่องที่บ้าน
+เป็น IP บ้านจริงซึ่งแทบไม่โดน ข้อได้เปรียบนี้ใหญ่กว่าความสะดวกของคลาวด์มาก
+
+```powershell
+.\run_forever.ps1
+```
+
+สคริปต์นี้รันบอทค้างไว้ ดับเมื่อไหร่เปิดใหม่ให้เอง พร้อมหน่วงเวลาแบบเพิ่มขึ้นเรื่อย ๆ
+เวลาดับซ้ำ ๆ และเก็บ log ไว้ในโฟลเดอร์ `logs/`
+
+**ให้เริ่มเองตอนเปิดเครื่อง** — เปิด Task Scheduler แล้วสร้าง task ใหม่:
+
+| ช่อง | ค่า |
+| --- | --- |
+| Trigger | At log on |
+| Action | Start a program |
+| Program | `powershell.exe` |
+| Arguments | `-WindowStyle Hidden -ExecutionPolicy Bypass -File "<path เต็มของ run_forever.ps1>"` |
+
+หรือสั่งจาก PowerShell ทีเดียว (แก้ path ให้ตรงเครื่องคุณก่อน):
+
+```powershell
+schtasks /create /tn "DiscordMusicBot" /tr "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -File \"C:\path\to\aa\run_forever.ps1\"" /sc onlogon /rl highest
+```
+
+อย่าลืมตั้งไม่ให้เครื่องหลับด้วย: Settings → System → Power → Screen and sleep → ตั้ง Sleep เป็น Never
+
+### ทางเลือกบนคลาวด์
+
+| บริการ | ฟรีจริงไหม | ข้อจำกัด |
+| --- | --- | --- |
+| **Oracle Cloud** | ฟรีถาวร | ตัวเลือกคลาวด์ที่ดีที่สุด ARM 4 core / 24GB แต่สมัครยาก ต้องใส่บัตร และบางเขตเต็มตลอด |
+| **Google Cloud** | ฟรีถาวร | e2-micro 1GB RAM เฉพาะบางเขตในสหรัฐ พอรันได้แต่ไม่เหลือมาก |
+| **Render** | ฟรีมีเงื่อนไข | Background Worker เสียเงินอย่างเดียว ต้องรันเป็น Web Service ซึ่งหลับหลังไม่มีคนเรียก 15 นาที ต้องมีตัวปลุกจากข้างนอก |
+| **Railway** | **ไม่ฟรีแล้ว** | ตัดฟรีทิ้งตั้งแต่ปี 2023 เหลือเครดิตทดลอง $5 แล้วต้องจ่าย $5/เดือน |
+
+ทุกทางบนคลาวด์เจอปัญหา IP datacenter เหมือนกันหมด ถ้าจะใช้จริงต้องเตรียม
+cookies ของ YouTube ไว้ด้วย (ดูหัวข้อแก้ปัญหาด้านล่าง) และยอมรับว่าอาจต้องอัปเดต
+cookies เป็นระยะ
+
+มี `Dockerfile` กับ `render.yaml` เตรียมไว้ให้แล้วถ้าจะลอง — deploy ด้วย Docker
+ได้ทุกเจ้าที่รองรับ container
+
 ## แก้ปัญหาที่เจอบ่อย
 
 **"Sign in to confirm you're not a bot"** — YouTube กันบอทอยู่ ให้ export cookies จากเบราว์เซอร์เป็นไฟล์ Netscape แล้วชี้ `YTDL_COOKIE_FILE` ไปที่ไฟล์นั้น
